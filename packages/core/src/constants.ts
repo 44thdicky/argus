@@ -1,4 +1,4 @@
-export const SCAN_QUEUE = 'argus:scan';
+export const SCAN_QUEUE = 'argus-scan';
 
 export const PIPELINE_STAGES = [
   'subdomain-enum',
