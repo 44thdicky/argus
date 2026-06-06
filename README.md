@@ -1,84 +1,195 @@
 # Argus
 
-Self-hosted attack surface management. Give it a domain you own and it keeps track of
-what you've got facing the internet (subdomains, open ports, services, known vulns) and
-flags it when that changes.
+Self-hosted attack surface management. Argus continuously discovers what a domain you own
+exposes to the internet — subdomains, hosts, open ports, services, certificates, and known
+vulnerabilities — and tracks how that surface changes between scans.
 
-Only scan things you own or are allowed to test.
+![license](https://img.shields.io/badge/license-MIT-blue)
+![typescript](https://img.shields.io/badge/TypeScript-5-3178c6)
+![next.js](https://img.shields.io/badge/Next.js-15-black)
 
-## Contents
+> **Authorized use only.** Only add and scan assets you own or have explicit written
+> permission to test. Active reconnaissance against systems you are not authorized to
+> assess may be unlawful.
 
-- [What's in here](#whats-in-here)
-- [Pipeline](#pipeline)
-- [Stack](#stack)
-- [Running it locally](#running-it-locally)
-- [Deploying](#deploying)
-- [Status](#status)
+## Table of contents
 
-## What's in here
+- [Overview](#overview)
+- [Features](#features)
+- [Architecture](#architecture)
+  - [Monorepo layout](#monorepo-layout)
+  - [Request flow](#request-flow)
+  - [Scan pipeline](#scan-pipeline)
+- [Tech stack](#tech-stack)
+- [Getting started](#getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Local development](#local-development)
+  - [Running in containers](#running-in-containers)
+- [Configuration](#configuration)
+- [Database and migrations](#database-and-migrations)
+- [Deployment](#deployment)
+- [Project status](#project-status)
+- [Security](#security)
+- [License](#license)
 
-It's a Turborepo monorepo:
+## Overview
 
-- `apps/web`: the Next.js dashboard and API
-- `apps/worker`: background scanner that pulls jobs off a queue
-- `packages/db`: Drizzle schema + Postgres client
-- `packages/core`: shared types, zod schemas, queue and pipeline setup
-- `infra`: compose files and Dockerfiles
+Most teams cannot reliably answer a simple question: what of ours is reachable from the
+internet right now, and did it change since yesterday? Argus answers it by turning a set of
+recon and scanning tools into an orchestrated, repeatable pipeline, storing every result,
+and diffing each run against the last so newly exposed assets and findings surface
+automatically.
 
-The web app drops scan jobs onto Redis (BullMQ), the worker picks them up, runs each
-stage, writes the results to Postgres, and saves a snapshot so the next run can be diffed
-against it.
+It is built as a Turborepo monorepo with a Next.js dashboard and a background worker that
+runs scans off a job queue. External tooling is optional: when the ProjectDiscovery
+binaries are not present, the worker falls back to built-in Node implementations so a scan
+still produces useful results.
 
-## Pipeline
+## Features
+
+- **Targets** — register domains, hold an ownership-verification token, and enable
+  continuous monitoring.
+- **Staged recon pipeline** — subdomain discovery, DNS resolution, port and service
+  scanning, HTTP fingerprinting, TLS inspection, security-header grading, and an optional
+  vulnerability scan.
+- **Asset inventory** — discovered subdomains, hosts, open ports, web endpoints, and
+  certificates, deduplicated with first/last-seen timestamps.
+- **Findings** — results graded by severity (info through critical).
+- **Snapshots and diffing** — every run is snapshotted, and changes raise alerts.
+- **Mobile-first dashboard** — responsive layout with a desktop sidebar and a mobile tab
+  bar.
+
+## Architecture
+
+### Monorepo layout
 
 ```
-subfinder -> dnsx -> naabu -> httpx -> tls/header checks -> nuclei -> store + diff
+argus/
+├─ apps/
+│  ├─ web/        Next.js dashboard: UI, API routes, auth, server actions
+│  └─ worker/     Background service that consumes the scan queue and runs the pipeline
+├─ packages/
+│  ├─ db/         Drizzle ORM schema, migrations, and the PostgreSQL client
+│  └─ core/       Shared zod schemas, queue wiring, and pipeline definitions
+└─ infra/         Dockerfiles, Compose files, and a private deploy-overlay template
 ```
 
-If those tools aren't installed the worker falls back to built-in Node implementations
-(DNS resolution, TCP port checks, fetch-based HTTP probing, a TLS inspector, and header
-grading), so a scan still produces real results. The default worker image
-(`infra/Dockerfile.worker`) is node-only; build `infra/Dockerfile.worker.tools` to bake in
-the ProjectDiscovery tools for fuller recon.
+### Request flow
 
-## Stack
+The dashboard writes a scan request to the database and enqueues a job on Redis (BullMQ).
+The worker consumes the job, runs each pipeline stage, persists assets and findings to
+PostgreSQL, snapshots the surface, and diffs it against the previous snapshot. The
+dashboard reads results back directly from PostgreSQL.
 
-Next.js, React, TypeScript, Tailwind, Drizzle, Postgres, Redis, BullMQ, Auth.js, Docker.
+```
+web (Next.js) ──enqueue──▶ Redis (BullMQ) ──▶ worker ──▶ PostgreSQL ──read──▶ web
+```
 
-## Running it locally
+### Scan pipeline
 
-You need Node 24+, pnpm, and Docker.
+Stages run in dependency order. Each persists its output before the next begins.
+
+| Stage | Tool | Output |
+| --- | --- | --- |
+| Subdomain enumeration | subfinder | candidate hostnames |
+| DNS resolution | dnsx / Node DNS | live hosts |
+| Port & service scan | naabu / Node TCP | open ports |
+| HTTP probe & fingerprint | httpx / Node fetch | status, title, server, technologies |
+| TLS & certificate analysis | Node TLS | issuer, validity, expiry |
+| Security header grading | built-in | A–F grade and missing headers |
+| Vulnerability scan | nuclei (optional) | findings with severity |
+| Persist & diff | built-in | snapshot and change set vs. the previous run |
+
+The default worker image is node-only and relies on the built-in fallbacks. Build
+`infra/Dockerfile.worker.tools` to bake in the ProjectDiscovery binaries for fuller recon.
+
+## Tech stack
+
+| Layer | Choice |
+| --- | --- |
+| Frontend | Next.js (App Router), React, Tailwind CSS |
+| Auth | Auth.js (credentials, JWT sessions) |
+| Backend | Next.js server actions and route handlers |
+| Worker | Node, BullMQ |
+| Data | PostgreSQL, Drizzle ORM |
+| Queue | Redis |
+| Validation | Zod |
+| Tooling | Turborepo, pnpm, TypeScript |
+| Runtime | Docker / Podman |
+
+## Getting started
+
+### Prerequisites
+
+- Node.js 24+
+- pnpm 10+
+- Docker (or Podman) for PostgreSQL and Redis
+
+### Local development
 
 ```bash
 cp .env.example .env
-# set AUTH_SECRET (openssl rand -base64 32)
+# set AUTH_SECRET, e.g. openssl rand -base64 32
 
 docker compose -f infra/docker-compose.yml up -d postgres redis
 pnpm install
-pnpm db:push
-pnpm dev
+pnpm db:push        # apply the schema to your local database
+pnpm dev            # starts the dashboard and the worker
 ```
 
-Dashboard is on http://localhost:3000.
+The dashboard is served at http://localhost:3000.
 
-Everything in containers instead:
+### Running in containers
 
 ```bash
 docker compose -f infra/docker-compose.yml up --build
 ```
 
-## Deploying
+## Configuration
 
-There's a sanitized prod template at `infra/docker-compose.prod.example.yml`. Copy it to
-`infra/docker-compose.prod.yml` (gitignored), point it at an env file you keep out of git,
-and stick the web service behind a reverse proxy. Postgres and Redis aren't published in
-that template.
+Configuration is read from the environment. See `.env.example` for a template.
 
-## Status
+| Variable | Required | Description |
+| --- | --- | --- |
+| `DATABASE_URL` | yes | PostgreSQL connection string |
+| `REDIS_URL` | yes | Redis connection string |
+| `AUTH_SECRET` | yes | Secret used to sign sessions (`openssl rand -base64 32`) |
+| `AUTH_URL` | yes | Public URL of the dashboard |
+| `WORKER_CONCURRENCY` | no | Number of concurrent scan jobs (default `4`) |
 
-M0 works end to end: monorepo, auth, targets, the job queue, and the first scan stage.
-Still on the list: the rest of the pipeline (ports, HTTP probing, TLS, headers, nuclei),
-then scheduled rescans with diffing, then alerting.
+## Database and migrations
+
+Drizzle owns the schema in `packages/db`.
+
+```bash
+pnpm db:generate    # generate a migration from schema changes
+pnpm db:migrate     # apply migrations (use this in deployments)
+pnpm db:push        # push the schema directly (handy in local dev)
+pnpm db:studio      # open Drizzle Studio
+```
+
+## Deployment
+
+A sanitized production Compose template lives at `infra/docker-compose.prod.example.yml`.
+Copy it to `infra/docker-compose.prod.yml` (gitignored), supply secrets through an
+environment file kept out of version control, and place the web service behind a reverse
+proxy. Database and Redis ports are not published in the production template.
+
+## Project status
+
+- [x] **M0** — monorepo foundation, auth, targets, job queue, worker, first scan stage
+- [x] **M1** — full pipeline (ports, HTTP, TLS, headers, optional nuclei) and snapshot
+  diffing with alerts
+- [ ] **M2** — scheduled re-scans and a change feed
+- [ ] **M3** — alert channels (email / webhook / chat) and alert rules
+- [ ] **M4** — organizations, RBAC, and ownership verification
+
+## Security
+
+- Scan only assets you are authorized to assess.
+- Secrets are read from the environment and never committed; production overlays and any
+  network-specific configuration stay out of version control.
+- Authentication uses hashed credentials and signed sessions.
 
 ## License
 

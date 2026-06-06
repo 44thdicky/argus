@@ -19,10 +19,8 @@ function init(): Database {
   }
   const sql = globalForDb.__argusSql ?? postgres(url, { max: 10 });
   const instance = drizzle(sql, { schema });
-  if (process.env.NODE_ENV !== 'production') {
-    globalForDb.__argusSql = sql;
-    globalForDb.__argusDb = instance;
-  }
+  globalForDb.__argusSql = sql;
+  globalForDb.__argusDb = instance;
   return instance;
 }
 
