@@ -8,3 +8,7 @@ html,
 body {
   height: 100%;
 }
+
+body {
+  font-family: var(--font-app), ui-sans-serif, system-ui, -apple-system, sans-serif;
+}
