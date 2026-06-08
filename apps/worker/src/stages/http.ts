@@ -32,7 +32,7 @@ export async function probeHttp(host: string, port: number): Promise<HttpResult 
   const timer = setTimeout(() => controller.abort(), 6000);
 
   try {
-    const res = await fetch(url, { redirect: 'manual', signal: controller.signal });
+    const res = await fetch(url, { redirect: 'follow', signal: controller.signal });
     const headers: Record<string, string> = {};
     res.headers.forEach((value, key) => {
       headers[key] = value;
